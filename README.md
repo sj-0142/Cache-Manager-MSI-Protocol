@@ -2,11 +2,11 @@
 
 
 ## Overview  
--This project implements a **dual-core cache system** in **Verilog HDL**, featuring **private L1 and L2 caches per core** and a **snooping-based MSI coherence protocol**. 
--The **L2 caches** implement an **LRU (Least Recently Used) replacement policy**, ensuring efficient block management and reduced conflict misses.  
--Each core maintains **its own cache hierarchy**, while **snooping + bus updates** ensure coherence across cores.  
--A **Write-Update Write-Through** snooping architecture has been followed. 
--Inclusive cache hierarchy used (Data in L1 guaranteed to be in L2)
+- This project implements a **dual-core cache system** in **Verilog HDL**, featuring **private L1 and L2 caches per core** and a **snooping-based MSI coherence protocol**. 
+- The **L2 caches** implement an **LRU (Least Recently Used) replacement policy**, ensuring efficient block management and reduced conflict misses.  
+- Each core maintains **its own cache hierarchy**, while **snooping + bus updates** ensure coherence across cores.  
+- A **Write-Update Write-Through** snooping architecture has been followed. 
+- Inclusive cache hierarchy used (Data in L1 guaranteed to be in L2)
 
 ---
 

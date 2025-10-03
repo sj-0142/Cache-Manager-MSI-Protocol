@@ -25,10 +25,10 @@
 ### Key Design Parameters  
 
 - **L1 Cache**: Direct-mapped 
-- **L2 Cache**: Set-associatively mapped - (Parametrised)
-- **Block Size**: 4 bytes  
+- **L2 Cache**: Set-associatively mapped - (Set size has been parametrised)
+- **Block Size**: 16 bits (parametrised) 
 - **Address Width**: 11 bits  
-- **Data Width**: 16 bits  
+- **Number of Lines in L1 and L2 caches**: 4 bits, 16 bits (both paramterised)
 - **Coherence States**: MSI (Modified, Shared, Invalid)  
 - **Bus Commands**: `BUS_RD`, `BUS_WR`, `BUS_UPDATE`, `IDLE`  
 

@@ -1,259 +1,337 @@
+//AUTHOR: SANJAY JAYARAMAN
+//
+// Word Length = 8 bits (byte addressable)
+// L1 Cache Size: (L1_LINES x BLOCK_BYTES) -- DIRECT MAPPING
+// L2 Cache Size: ({L2_SETS * L2_WAYS} x BLOCK_BYTES) -- SET ASSOCIATIVE MAPPING
+
 
 module cache_controller #(
-
-// MM Size -> MEM_SIZE X DATA_BITS bits
-// L1 Cache Size -> L1_LINES x DATA_BITS bits
-// L2 Cache Size -> (L2_SETS*L2_WAYS) x DATA_BITS
-
-
     parameter ADDR_BITS = 11,
-    parameter DATA_BITS = 16,
-    parameter BLOCK_BYTES = 4,
-    parameter BLOCK_OFFSET = 2
+    parameter DATA_BITS = 8, // word length - byte addressable
+    parameter BLOCK_BYTES = 2, // 2 bytes in one line of cache 
+    parameter BLOCK_OFFSET = 1 // log2(BLOCK_BYTES)
 )(
     input  wire                  clk,
     input  wire                  rst,
-    input  wire                  core_id,     // 0 for Core0 and 1 for Core1
+    input  wire                  core_id,
     input  wire [ADDR_BITS-1:0]  addr,
     input  wire [DATA_BITS-1:0]  data_in,
-    input  wire                  mode,        // 0 = read, 1 = write
+    input  wire                  mode,
     
-    // Bus interface i/o
-    output reg  [1:0]            bus_cmd,     // 00=IDLE, 01=BUS_RD, 10=BUS_WR, 11=BUS_UPDATE
+    // Bus interface
+    output reg  [1:0]            bus_cmd,
     output reg  [ADDR_BITS-1:0]  bus_addr,
     output reg  [DATA_BITS-1:0]  bus_data,
-    input  wire [1:0]            bus_cmd_in,  // Bus commands from other core
+    input  wire [1:0]            bus_cmd_in,
     input  wire [ADDR_BITS-1:0]  bus_addr_in,
     input  wire [DATA_BITS-1:0]  bus_data_in,
     
+    input  wire [0:0]            bus_src_id,
+    output wire [0:0]            bus_src_out,
+    
+    // Memory interface ports
+    output reg  [5:0]            mem_rd_addr,
+    input  wire [DATA_BITS-1:0]  mem_rd_data,
+    output reg                   mem_rd_en,
+    output reg  [5:0]            mem_wr_addr,
+    output reg  [DATA_BITS-1:0]  mem_wr_data,
+    output reg                   mem_wr_en,
+    
     output reg  [DATA_BITS-1:0]  data_out,
-    output reg                   hit1,
-    output reg                   hit2,
-    output reg                   wait_req
+    output wire                   hit1,
+    output wire                   hit2,
+    output wire                   wait_req
 );
 
     // Cache parameters
     localparam L1_LINES      = 4;
     localparam L1_INDEX_BITS = 2;
-    localparam L1_TAG_BITS   = ADDR_BITS - L1_INDEX_BITS - BLOCK_OFFSET; 
-    localparam L1_BLOCK_BITS = DATA_BITS;
+    localparam L1_TAG_BITS   = ADDR_BITS - L1_INDEX_BITS - BLOCK_OFFSET;
+    localparam L1_BLOCK_BITS = BLOCK_BYTES*8;
     
     localparam L2_SETS       = 16;
     localparam L2_WAYS       = 1;
     localparam L2_INDEX_BITS = 4;
-    localparam L2_TAG_BITS   = ADDR_BITS - L2_INDEX_BITS - 2;
-    localparam L2_BLOCK_BITS = DATA_BITS;
+    localparam L2_TAG_BITS   = ADDR_BITS - L2_INDEX_BITS - BLOCK_OFFSET;
+    localparam L2_BLOCK_BITS = BLOCK_BYTES*8;
     
-    localparam MEM_BLOCKS = 32;
-    
-    // MSI Protocol state initialisation
+    // MSI Protocol states
     localparam INVALID  = 2'b00;
     localparam SHARED   = 2'b01;
     localparam MODIFIED = 2'b10;
     
-    // Bus Command initialisation
+    // Bus Commands
     localparam BUS_IDLE   = 2'b00;
     localparam BUS_RD     = 2'b01;
     localparam BUS_WR     = 2'b10;
     localparam BUS_UPDATE = 2'b11;
 
-    // L1 Cache Arrays - separate for each core 
-    reg [L1_BLOCK_BITS-1:0] l1_data   [0:1][0:L1_LINES-1];
-    reg [L1_TAG_BITS-1:0]   l1_tag    [0:1][0:L1_LINES-1];
-    reg [1:0]               l1_msi    [0:1][0:L1_LINES-1]; 
+    // Cache Arrays
+    reg [L1_BLOCK_BITS-1:0] l1_data   [0:L1_LINES-1];
+    reg [L1_TAG_BITS-1:0]   l1_tag    [0:L1_LINES-1];
+    reg [1:0]               l1_msi    [0:L1_LINES-1];
     
-    // L2 Cache Arrays - separate for each core
-    reg [L2_BLOCK_BITS-1:0] l2_data   [0:1][0:L2_SETS-1][0:L2_WAYS-1];
-    reg [L2_TAG_BITS-1:0]   l2_tag    [0:1][0:L2_SETS-1][0:L2_WAYS-1];
-    reg [1:0]               l2_msi    [0:1][0:L2_SETS-1][0:L2_WAYS-1];
-    reg [1:0]               lru       [0:1][0:L2_SETS-1];
+    reg [L2_BLOCK_BITS-1:0] l2_data   [0:L2_SETS-1][0:L2_WAYS-1];
+    reg [L2_TAG_BITS-1:0]   l2_tag    [0:L2_SETS-1][0:L2_WAYS-1];
+    reg [1:0]               l2_msi    [0:L2_SETS-1][0:L2_WAYS-1];
+    reg                     lru       [0:L2_SETS-1];
 
-    // Shared Main Memory
-    reg [DATA_BITS-1:0]     main_memory [0:MEM_BLOCKS-1];
-    
     // Internal registers
-    reg found;
-    reg [DATA_BITS-1:0] fetched;
-    integer i, j, k;
+    reg mem_rd_pending;
+    integer j, k;
 
     // Address breakdown
-    wire [1:0]                  offset;
     wire [L1_INDEX_BITS-1:0]    l1_index;
     wire [L1_TAG_BITS-1:0]      l1_tag_in;
     wire [L2_INDEX_BITS-1:0]    l2_index;
     wire [L2_TAG_BITS-1:0]      l2_tag_in;
     
-    assign offset = addr[1:0];
-    assign l1_index = addr[1+L1_INDEX_BITS:2];
-    assign l1_tag_in = addr[ADDR_BITS-1:L1_INDEX_BITS+2];
-    assign l2_index = addr[1+L2_INDEX_BITS:2];
-    assign l2_tag_in = addr[ADDR_BITS-1:L2_INDEX_BITS+2];
     
+    // Combinational hit/wait outputs
+    wire miss_both = !l1_hit_detected && !l2_hit_detected;
+    assign hit1     = (!mem_rd_pending && mode == 0 && l1_hit_detected);
+    assign hit2     = (!mem_rd_pending && mode == 0 && !l1_hit_detected && l2_hit_detected);
+    assign wait_req = ( mem_rd_pending )
+                    || ( mode == 0 && miss_both )|| (mode==1 && miss_both);
+
+
     
-    // Snooping address breakdown -> assigns the index and tag of the variable being processed by the bus in snoop variables
+    // Hit detection wires
+    wire l1_hit_detected;
+    wire l2_hit_detected;
+    wire [L2_WAYS-1:0] l2_way_hit;
+    
+    assign l1_index = addr[BLOCK_OFFSET + L1_INDEX_BITS - 1 : BLOCK_OFFSET];
+    assign l1_tag_in = addr[ADDR_BITS-1 : L1_INDEX_BITS + BLOCK_OFFSET];
+    assign l2_index = addr[BLOCK_OFFSET + L2_INDEX_BITS - 1 : BLOCK_OFFSET];
+    assign l2_tag_in = addr[ADDR_BITS-1 : L2_INDEX_BITS + BLOCK_OFFSET];
+    
+    // Snooping address breakdown
     wire [L1_INDEX_BITS-1:0]    snoop_l1_index;
     wire [L1_TAG_BITS-1:0]      snoop_l1_tag;
     wire [L2_INDEX_BITS-1:0]    snoop_l2_index;
     wire [L2_TAG_BITS-1:0]      snoop_l2_tag;
     
-    assign snoop_l1_index = bus_addr_in[1+L1_INDEX_BITS:2];
-    assign snoop_l1_tag = bus_addr_in[ADDR_BITS-1:L1_INDEX_BITS+2];
-    assign snoop_l2_index = bus_addr_in[1+L2_INDEX_BITS:2];
-    assign snoop_l2_tag = bus_addr_in[ADDR_BITS-1:L2_INDEX_BITS+2];
+    assign snoop_l1_index = bus_addr_in[BLOCK_OFFSET + L1_INDEX_BITS - 1 : BLOCK_OFFSET];
+    assign snoop_l1_tag = bus_addr_in[ADDR_BITS-1:L1_INDEX_BITS+BLOCK_OFFSET];
+    assign snoop_l2_index = bus_addr_in[BLOCK_OFFSET + L2_INDEX_BITS - 1 : BLOCK_OFFSET];
+    assign snoop_l2_tag = bus_addr_in[ADDR_BITS-1:L2_INDEX_BITS+BLOCK_OFFSET];
+    
+    assign bus_src_out = core_id;
+    
+    // Combinational hit detection
+    assign l1_hit_detected = (l1_msi[l1_index] != INVALID) && (l1_tag[l1_index] == l1_tag_in);
+    
+    // L2 hit detection for each way
+    genvar w;
+    generate
+        for (w = 0; w < L2_WAYS; w = w + 1) begin : l2_hit_gen
+            assign l2_way_hit[w] = (l2_msi[l2_index][w] != INVALID) && (l2_tag[l2_index][w] == l2_tag_in);
+        end
+    endgenerate
+    
+    assign l2_hit_detected = |l2_way_hit; // OR of all way hits
+    
+    initial begin
+        // Initialize caches
+        for (j = 0; j < L1_LINES; j = j + 1) begin
+            l1_data[j] = 16'b0;
+            l1_tag[j] = 7'b0;
+            l1_msi[j] = INVALID;
+        end
+        for (j = 0; j < L2_SETS; j = j + 1) begin
+            for (k = 0; k < L2_WAYS; k = k + 1) begin
+                l2_data[j][k] = 16'b0;
+                l2_tag[j][k] = 6'b0;
+                l2_msi[j][k] = INVALID;
+            end
+            lru[j] = 0;
+        end
+        
+        bus_cmd = BUS_IDLE;
+        bus_addr = 0;
+        bus_data = 0;
+        mem_rd_addr = 0;
+        mem_rd_en = 0;
+        mem_wr_addr = 0;
+        mem_wr_data = 0;
+        mem_wr_en = 0;
+        data_out = 0;
+        mem_rd_pending = 0;
+    end
 
-    always @(posedge clk) begin
-        if (rst) begin
-            // Initialize both caches and states (L1 and L2)
-            for (i = 0; i < 2; i = i + 1) begin
-                for (j = 0; j < L1_LINES; j = j + 1) begin
-                    l1_data[i][j] <= 0;
-                    l1_tag[i][j] <= 0;
-                    l1_msi[i][j] <= INVALID; //INVALID is initial state of all memory core addresses 
+always @(posedge clk) begin
+    if (rst) begin
+        // Reset L1
+        for (j = 0; j < L1_LINES; j = j + 1) begin
+            l1_data[j] <= {L1_BLOCK_BITS{1'b0}};
+            l1_tag[j]  <= {L1_TAG_BITS{1'b0}};
+            l1_msi[j]  <= INVALID;
+        end
+        // Reset L2
+        for (j = 0; j < L2_SETS; j = j + 1) begin
+            for (k = 0; k < L2_WAYS; k = k + 1) begin
+                l2_data[j][k] <= {L2_BLOCK_BITS{1'b0}};
+                l2_tag[j][k]  <= {L2_TAG_BITS{1'b0}};
+                l2_msi[j][k]  <= INVALID;
+            end
+            lru[j] <= 0;
+        end
+
+        // Reset outputs
+        bus_cmd        <= BUS_IDLE;
+        bus_addr       <= {ADDR_BITS{1'b0}};
+        bus_data       <= {DATA_BITS{1'b0}};
+        mem_rd_addr    <= 0;
+        mem_rd_en      <= 1'b0;
+        mem_wr_addr    <= 0;
+        mem_wr_data    <= {DATA_BITS{1'b0}};
+        mem_wr_en      <= 1'b0;
+        data_out       <= {DATA_BITS{1'b0}};
+        mem_rd_pending <= 1'b0;
+    end else begin
+        // Default outputs every cycle
+        bus_cmd   <= BUS_IDLE;
+        bus_addr  <= {ADDR_BITS{1'b0}};
+        bus_data  <= {DATA_BITS{1'b0}};
+        mem_rd_en <= 1'b0;
+        mem_wr_en <= 1'b0;
+
+        // -------------------------
+        // SNOOPING LOGIC
+        // -------------------------
+        if (bus_src_id == ~core_id && bus_cmd_in != BUS_IDLE) begin
+            if (bus_cmd_in == BUS_UPDATE || bus_cmd_in == BUS_WR) begin
+                // L1 update & downgrade to SHARED if present
+                if (l1_tag[snoop_l1_index] == snoop_l1_tag && l1_msi[snoop_l1_index] != INVALID) begin
+                    l1_data[snoop_l1_index] <= bus_data_in;
+                    l1_msi[snoop_l1_index]  <= SHARED;
                 end
-                for (j = 0; j < L2_SETS; j = j + 1) begin
-                    for (k = 0; k < L2_WAYS; k = k + 1) begin
-                        l2_data[i][j][k] <= 0;
-                        l2_tag[i][j][k] <= 0;
-                        l2_msi[i][j][k] <= INVALID;
-                    end
-                    lru[i][j] <= 0; 
+                // L2 update - check each way explicitly
+                if (L2_WAYS >= 1 && l2_tag[snoop_l2_index][0] == snoop_l2_tag && l2_msi[snoop_l2_index][0] != INVALID) begin
+                    l2_data[snoop_l2_index][0] <= bus_data_in;
+                    l2_msi[snoop_l2_index][0]  <= SHARED;
                 end
             end
-            
-            for (i = 0; i < MEM_BLOCKS; i = i + 1) begin
-                main_memory[i] <= i + 16'h1000; // Initialize Main Memory with distinct values
-            end
-            
-            bus_cmd <= BUS_IDLE;
-            bus_addr <= 0;
-            bus_data <= 0;
-            data_out <= 0;
-            hit1 <= 0;
-            hit2 <= 0;
-            wait_req <= 0;
-            
-        end else begin
-            // Default values
-            hit1 <= 0;
-            hit2 <= 0;
-            wait_req <= 0;
-            bus_cmd <= BUS_IDLE;
-            
-            // SNOOPING LOGIC -> Handle bus transactions from other cores
-            if (bus_cmd_in == BUS_UPDATE) begin
-               
-                // Check if the address being updated (snoop_l1_tag)in the bus is the same as the one in L1 cache and it is not invalid
-                // If so, the L1 cache takes this data from the bus and sets its state to SHARED
-                if (l1_tag[core_id][snoop_l1_index] == snoop_l1_tag && 
-                    l1_msi[core_id][snoop_l1_index] != INVALID) begin
-                    l1_data[core_id][snoop_l1_index] <= bus_data_in;
-                    l1_msi[core_id][snoop_l1_index] <= SHARED;
+
+            if (bus_cmd_in == BUS_RD) begin
+                if (l1_tag[snoop_l1_index] == snoop_l1_tag && l1_msi[snoop_l1_index] == MODIFIED) begin
+                    l1_msi[snoop_l1_index] <= SHARED;
                 end
-                
-                // Check L2 cache similarly
-                for (j = 0; j < L2_WAYS; j = j + 1) begin
-                    if (l2_tag[core_id][snoop_l2_index][j] == snoop_l2_tag && 
-                        l2_msi[core_id][snoop_l2_index][j] != INVALID) begin
-                        l2_data[core_id][snoop_l2_index][j] <= bus_data_in;
-                        l2_msi[core_id][snoop_l2_index][j] <= SHARED;
-                    end
+                if (L2_WAYS >= 1 && l2_tag[snoop_l2_index][0] == snoop_l2_tag && l2_msi[snoop_l2_index][0] == MODIFIED) begin
+                    l2_msi[snoop_l2_index][0] <= SHARED;
                 end
             end
-            
-            // CORE OPERATION LOGIC
+        end
+
+        // -------------------------
+        // Handle memory read completion
+        // -------------------------
+        if (mem_rd_pending) begin
+            mem_rd_pending <= 1'b0;
+            data_out <= mem_rd_data;
+
+            // Allocate into L2 (way 0 for simplicity since L2_WAYS=1)
+            l2_data[l2_index][0] <= mem_rd_data;
+            l2_tag[l2_index][0]  <= l2_tag_in;
+            l2_msi[l2_index][0]  <= SHARED;
+
+            // Promote to L1
+            l1_data[l1_index] <= mem_rd_data;
+            l1_tag[l1_index]  <= l1_tag_in;
+            l1_msi[l1_index]  <= SHARED;
+        end
+
+        // -------------------------
+        // CORE OPERATION LOGIC
+        // -------------------------
+        if (!mem_rd_pending) begin
             if (mode == 0) begin
-                // ============== READ OPERATION ==============
-                // Check L1 first does it have the required data in VALID state => L1 HIT
-                if (l1_msi[core_id][l1_index] != INVALID && 
-                    l1_tag[core_id][l1_index] == l1_tag_in) begin
+                // READ OPERATION
+                if (l1_hit_detected) begin
                     // L1 HIT
-                    data_out <= l1_data[core_id][l1_index];
-                    hit1 <= 1;
-                    
-                end else begin
-                    // L1 MISS => Check L2 similar to the block above but here once we find it, push it to L1 from L2
-                    found = 0;
-                    for (j = 0; j < L2_WAYS; j = j + 1) begin
-                        if (l2_msi[core_id][l2_index][j] != INVALID && 
-                            l2_tag[core_id][l2_index][j] == l2_tag_in && !found) begin
-                            // L2 HIT
-                            data_out <= l2_data[core_id][l2_index][j];
-                            hit2 <= 1;
-                            found = 1;
-                            
-                            // Promote to L1
-                            l1_data[core_id][l1_index] <= l2_data[core_id][l2_index][j];
-                            l1_tag[core_id][l1_index] <= l1_tag_in;
-                            l1_msi[core_id][l1_index] <= l2_msi[core_id][l2_index][j];
-                        end
-                    end
-                    
-                    if (!found) begin
-                        // MISS in both L1 and L2 either compulsory/coherence miss- Fetch from memory
-                        fetched = main_memory[addr[7:2]];
-                        data_out <= fetched;
-                        wait_req <= 1;
-                        
-                        // Issue bus read
-                        bus_cmd <= BUS_RD;
-                        bus_addr <= addr;
-                        
-                        // Allocate in L2 while setting its tag to SHARED (inclusive type of cache L1 is subset of L2)
-                        //No MODIFICATION happens yet
-                        
-                        j = lru[core_id][l2_index];
-                        l2_data[core_id][l2_index][j] <= fetched;
-                        l2_tag[core_id][l2_index][j] <= l2_tag_in;
-                        l2_msi[core_id][l2_index][j] <= SHARED;
-                        lru[core_id][l2_index] <= (lru[core_id][l2_index] + 1) % L2_WAYS;
-                        
+                    data_out <= l1_data[l1_index];
+                end else if (l2_hit_detected) begin
+                    // L2 HIT (check way 0 since L2_WAYS=1)
+                    if (l2_way_hit[0]) begin
+                        data_out <= l2_data[l2_index][0];
+
                         // Promote to L1
-                        l1_data[core_id][l1_index] <= fetched;
-                        l1_tag[core_id][l1_index] <= l1_tag_in;
-                        l1_msi[core_id][l1_index] <= SHARED;
+                        l1_data[l1_index] <= l2_data[l2_index][0];
+                        l1_tag[l1_index]  <= l1_tag_in;
+                        l1_msi[l1_index]  <= l2_msi[l2_index][0];
                     end
+                end else begin
+                    // MISS in both L1 & L2: issue memory read
+                    mem_rd_addr    <= addr[6:1]; // Convert to memory address
+                    mem_rd_en      <= 1'b1;
+                    mem_rd_pending <= 1'b1;
+
+                    // Issue bus read
+                    bus_cmd  <= BUS_RD;
+                    bus_addr <= addr;
                 end
-                
             end else begin
-                // ============== WRITE OPERATION ==============
-                // Write Update Strategy: Whenever a modification is made, the change is broadcasted across all the cores and all of them are set to the shared state
-                
-                // Update local cache
-                l1_data[core_id][l1_index] <= data_in;
-                l1_tag[core_id][l1_index] <= l1_tag_in;
-                
-                // Broadcast update to other cores
-                bus_cmd <= BUS_UPDATE;
-                bus_addr <= addr;
-                bus_data <= data_in;
-                
-                // Set local state to SHARED (write update strategy)
-                l1_msi[core_id][l1_index] <= SHARED;
-                
-                // Update L2 if present
-                found = 0;
-                for (j = 0; j < L2_WAYS; j = j + 1) begin
-                    if (l2_tag[core_id][l2_index][j] == l2_tag_in && 
-                        l2_msi[core_id][l2_index][j] != INVALID && !found) begin
-                        l2_data[core_id][l2_index][j] <= data_in;
-                        l2_msi[core_id][l2_index][j] <= SHARED;
-                        found = 1;
+                // WRITE OPERATION
+                if (l1_hit_detected) begin
+                    // L1 HIT: update and set MODIFIED
+                    l1_data[l1_index] <= data_in;
+                    l1_msi[l1_index]  <= MODIFIED;
+
+                    // Broadcast write
+                    bus_cmd  <= BUS_WR;
+                    bus_addr <= addr;
+                    bus_data <= data_in;
+                    
+                    // Write through to memory
+                    mem_wr_addr <= addr[6:1];
+                    mem_wr_data <= data_in;
+                    mem_wr_en   <= 1'b1;
+                end else if (l2_hit_detected) begin
+                    // L2 HIT: update and promote
+                    if (l2_way_hit[0]) begin
+                        l2_data[l2_index][0] <= data_in;
+                        l2_msi[l2_index][0]  <= MODIFIED;
+
+                        // Promote to L1
+                        l1_data[l1_index] <= data_in;
+                        l1_tag[l1_index]  <= l1_tag_in;
+                        l1_msi[l1_index]  <= MODIFIED;
+
+                        bus_cmd  <= BUS_WR;
+                        bus_addr <= addr;
+                        bus_data <= data_in;
+                        
+                        // Write through to memory
+                        mem_wr_addr <= addr[6:1];
+                        mem_wr_data <= data_in;
+                        mem_wr_en   <= 1'b1;
                     end
+                end else begin
+                    // MISS in both: allocate and write
+                    // Allocate in L2 (way 0)
+                    l2_data[l2_index][0] <= data_in;
+                    l2_tag[l2_index][0]  <= l2_tag_in;
+                    l2_msi[l2_index][0]  <= MODIFIED;
+
+                    // Allocate in L1
+                    l1_data[l1_index] <= data_in;
+                    l1_tag[l1_index]  <= l1_tag_in;
+                    l1_msi[l1_index]  <= MODIFIED;
+
+                    // Write through to memory
+                    mem_wr_addr <= addr[6:1];
+                    mem_wr_data <= data_in;
+                    mem_wr_en   <= 1'b1;
+
+                    // Broadcast update
+                    bus_cmd  <= BUS_UPDATE;
+                    bus_addr <= addr;
+                    bus_data <= data_in;
                 end
-                
-                // If not in L2, allocate
-                if (!found) begin
-                    j = lru[core_id][l2_index];
-                    l2_data[core_id][l2_index][j] <= data_in;
-                    l2_tag[core_id][l2_index][j] <= l2_tag_in;
-                    l2_msi[core_id][l2_index][j] <= SHARED;
-                    lru[core_id][l2_index] <= (lru[core_id][l2_index] + 1) % L2_WAYS;
-                end
-                
-                // Update main memory directly (write-through)
-                main_memory[addr[7:2]] <= data_in;
             end
         end
     end
+end
 
 endmodule

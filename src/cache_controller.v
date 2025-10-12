@@ -74,7 +74,6 @@ module cache_controller #(
     reg [L2_BLOCK_BITS-1:0] l2_data   [0:L2_SETS-1][0:L2_WAYS-1];
     reg [L2_TAG_BITS-1:0]   l2_tag    [0:L2_SETS-1][0:L2_WAYS-1];
     reg [1:0]               l2_msi    [0:L2_SETS-1][0:L2_WAYS-1];
-    reg                     lru       [0:L2_SETS-1];
 
     // Internal registers
     reg mem_rd_pending;
@@ -145,7 +144,6 @@ module cache_controller #(
                 l2_tag[j][k] = 6'b0;
                 l2_msi[j][k] = INVALID;
             end
-            lru[j] = 0;
         end
         
         bus_cmd = BUS_IDLE;
@@ -175,7 +173,6 @@ always @(posedge clk) begin
                 l2_tag[j][k]  <= {L2_TAG_BITS{1'b0}};
                 l2_msi[j][k]  <= INVALID;
             end
-            lru[j] <= 0;
         end
 
         // Reset outputs

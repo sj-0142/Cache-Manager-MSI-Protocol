@@ -25,9 +25,10 @@
 
 - **L1 Cache**: Direct-mapped 
 - **L2 Cache**: Set-associatively mapped - (Set size has been parametrised)
+- **Word size**: 1 byte (Byte addressible)
 - **Block Size**: 16 bits (parametrised) 
 - **Address Width**: 11 bits  
-- **Number of Lines in L1 and L2 caches**: 4 bits, 16 bits (both paramterised)
+- **Number of Lines in L1 and L2 caches**: 4 and 16 (both paramterised)
 - **Coherence States**: MSI (Modified, Shared, Invalid)  
 - **Bus Commands**: `BUS_RD`, `BUS_WR`, `BUS_UPDATE`, `IDLE`  
 
@@ -42,7 +43,7 @@ The cache system is composed of **two cache controller instances** and a **share
    - Uses MSI protocol for coherence.  
    - Handles:  
      - **Read requests** (L1 → L2 → memory).  
-     - **Write requests** (update local caches + memory) - uses LRU cache replacmeent policy.  
+     - **Write requests** (update local caches + memory) 
      - **Snooped updates** (incoming bus updates from the other core).  
 
    **MSI State Transitions**:  

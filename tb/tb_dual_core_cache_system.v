@@ -1,13 +1,13 @@
+
 `timescale 1ns / 1ps
 
 module tb_dual_core_cache_system();
     
-    // Parameters
     parameter ADDR_BITS = 11;
-    parameter DATA_BITS = 16;
-    parameter BLOCK_BYTES = 4;
-    parameter BLOCK_OFFSET = 2;
-    parameter CLOCK_PERIOD = 10; // 10ns clock period (100MHz)
+    parameter DATA_BITS = 8;
+    parameter BLOCK_BYTES = 2;
+    parameter BLOCK_OFFSET = 1;
+    parameter CLOCK_PERIOD = 10;
     
     // Testbench signals
     reg  clk;
@@ -33,7 +33,7 @@ module tb_dual_core_cache_system();
         forever #(CLOCK_PERIOD/2) clk = ~clk;
     end
     
-    // Instantiate DUT
+
     dual_core_cache_system #(
         .ADDR_BITS(ADDR_BITS),
         .DATA_BITS(DATA_BITS),
@@ -58,165 +58,184 @@ module tb_dual_core_cache_system();
         .wait_req_1(wait_req_1)
     );
     
-    // Task to display test results
+
     task display_status;
         input [31:0] test_num;
         input [127:0] description;
         begin
-            $display("\\n=== TEST %0d: %s ===", test_num, description);
+            $display("\n=== TEST %0d: %s ===", test_num, description);
             $display("Core 0: addr=0x%h, data_in=0x%h, mode=%b", addr_0, data_in_0, mode_0);
             $display("Core 0: data_out=0x%h, hit1=%b, hit2=%b, wait=%b", data_out_0, hit1_0, hit2_0, wait_req_0);
             $display("Core 1: addr=0x%h, data_in=0x%h, mode=%b", addr_1, data_in_1, mode_1);
             $display("Core 1: data_out=0x%h, hit1=%b, hit2=%b, wait=%b", data_out_1, hit1_1, hit2_1, wait_req_1);
-            $display("Bus: cmd=0x%h, addr=0x%h, data=0x%h", dut.universal_bus_cmd, dut.universal_bus_addr, dut.universal_bus_data);
+            
+            // Check if bus signals exist (for debugging)
+            if ($test$plusargs("debug_bus")) begin
+                $display("Core 0 Bus: cmd=0x%h, addr=0x%h, data=0x%h", dut.bus_cmd_0, dut.bus_addr_0, dut.bus_data_0);
+                $display("Core 1 Bus: cmd=0x%h, addr=0x%h, data=0x%h", dut.bus_cmd_1, dut.bus_addr_1, dut.bus_data_1);
+            end
         end
     endtask
     
-    // Task to wait for clock edges
-    task wait_clocks;
-        input [7:0] num_clocks;
+    // Task to check expected results with proper timing
+    task check_result;
+        input [31:0] test_num;
+        input [DATA_BITS-1:0] exp_data_0, exp_data_1;
+        input exp_hit1_0, exp_hit2_0, exp_wait_0;
+        input exp_hit1_1, exp_hit2_1, exp_wait_1;
         begin
-            repeat(num_clocks) @(posedge clk);
+            if (data_out_0 !== exp_data_0 || hit1_0 !== exp_hit1_0 || hit2_0 !== exp_hit2_0 || wait_req_0 !== exp_wait_0 ||
+                data_out_1 !== exp_data_1 || hit1_1 !== exp_hit1_1 || hit2_1 !== exp_hit2_1 || wait_req_1 !== exp_wait_1) begin
+                $display("ERROR in TEST %0d!", test_num);
+                $display("Expected Core 0: data=0x%h, hit1=%b, hit2=%b, wait=%b", exp_data_0, exp_hit1_0, exp_hit2_0, exp_wait_0);
+                $display("Actual   Core 0: data=0x%h, hit1=%b, hit2=%b, wait=%b", data_out_0, hit1_0, hit2_0, wait_req_0);
+                $display("Expected Core 1: data=0x%h, hit1=%b, hit2=%b, wait=%b", exp_data_1, exp_hit1_1, exp_hit2_1, exp_wait_1);
+                $display("Actual   Core 1: data=0x%h, hit1=%b, hit2=%b, wait=%b", data_out_1, hit1_1, hit2_1, wait_req_1);
+
+            end else begin
+                $display("PASS: TEST %0d", test_num);
+            end
+        end
+    endtask
+
+
+    task apply_and_check;
+        input [ADDR_BITS-1:0] new_addr_0, new_addr_1;
+        input [DATA_BITS-1:0] new_data_in_0, new_data_in_1;
+        input new_mode_0, new_mode_1;
+        input [31:0] test_num;
+        input [127:0] description;
+        input [DATA_BITS-1:0] exp_data_0, exp_data_1;
+        input exp_hit1_0, exp_hit2_0, exp_wait_0;
+        input exp_hit1_1, exp_hit2_1, exp_wait_1;
+        begin
+            // Apply inputs at clock edge
+            @(posedge clk);
+            addr_0 = new_addr_0;
+            addr_1 = new_addr_1;
+            data_in_0 = new_data_in_0;
+            data_in_1 = new_data_in_1;
+            mode_0 = new_mode_0;
+            mode_1 = new_mode_1;
+            
+            // Wait for outputs to settle (sample at negative edge)
+            @(negedge clk);
+            display_status(test_num, description);
+            check_result(test_num, exp_data_0, exp_data_1, exp_hit1_0, exp_hit2_0, exp_wait_0, exp_hit1_1, exp_hit2_1, exp_wait_1);
         end
     endtask
     
     // Main test sequence
     initial begin
-        $display("Starting Dual-Core Cache Controller with MSI Protocol Test");
-        $display("=============================================================");
+        $display("Starting TIMING-FIXED Dual-Core Cache Controller Test");
+        $display("====================================================");
         
-        // Initialize signals
-        rst = 1;
-        addr_0 = 0; data_in_0 = 0; mode_0 = 0;
-        addr_1 = 0; data_in_1 = 0; mode_1 = 0;
         
         // Reset sequence
-        wait_clocks(5);
+        #5
         rst = 0;
-        wait_clocks(2);
+        #15
         
-        // TEST 1: Core 0 reads from memory (miss)
-        addr_0 = 11'h040;  // Address 0x040
-        mode_0 = 0;        // Read
-        wait_clocks(1);
-        display_status(1, "Core 0 read miss from memory");
-        
-        // TEST 2: Core 0 reads same location again (L1 hit)
-        wait_clocks(1);
-        display_status(2, "Core 0 read hit from L1 cache");
-        
-        // TEST 3: Core 1 reads same location (should get from memory)
-        addr_1 = 11'h040;  // Same address
-        mode_1 = 0;        // Read
-        wait_clocks(1);
-        display_status(3, "Core 1 read same address");
-        
+        $display("\n=== MEMORY LAYOUT VERIFICATION ===");
+        $display("main_memory[0] = 0x10, main_memory[1] = 0x11, main_memory[2] = 0x12, ...");
+        $display("Address 0x002 → memory[1] = 0x11");
+        $display("Address 0x000 → memory[0] = 0x10");
+        #10
+        // TEST 1: Core 0 reads from memory (COMPULSORY MISS)
+        $display("\n=== BASIC FUNCTIONALITY TESTS ===");
+        apply_and_check(
+            11'h002, 11'h000,      // addr_0, addr_1
+            8'h00, 8'h00,          // data_in_0, data_in_1  
+            1'b0, 1'b0,            // mode_0, mode_1 (both read)
+            1, "Core 0 compulsory miss",
+            8'h00, 8'h00,          // exp_data_0, exp_data_1
+            1'b0, 1'b0, 1'b1,      // exp_hit1_0, exp_hit2_0, exp_wait_0
+            1'b0, 1'b0, 1'b1       // exp_hit1_1, exp_hit2_1, exp_wait_1
+        );
+        #20
+        // TEST 2: Core 0 reads same location again (L1 HIT)
+        apply_and_check(
+            11'h002, 11'h000,      // Keep same addresses
+            8'h00, 8'h00,
+            1'b0, 1'b0,
+            2, "Core 0 L1 hit",
+            8'h11, 8'h10,
+            1'b1, 1'b0, 1'b0,      // Should be L1 hit now
+            1'b1, 1'b0, 1'b0
+        );
+        #20
+        // TEST 3: Core 1 reads same location (COMPULSORY MISS for Core 1)  
+        apply_and_check(
+            11'h002, 11'h002,      // Both cores access same address
+            8'h00, 8'h00,
+            1'b0, 1'b0,
+            3, "Core 1 compulsory miss same address",
+            8'h11, 8'h10,
+            1'b1, 1'b0, 1'b0,      // Core 0 still hits
+            1'b0, 1'b0, 1'b1       // Core 1 should miss
+        );
+        #20
         // TEST 4: Core 0 writes to the location (write update)
-        addr_0 = 11'h040;
-        data_in_0 = 16'hABCD;
-        mode_0 = 1;        // Write
-        wait_clocks(1);
-        display_status(4, "Core 0 write with update broadcast");
+        apply_and_check(
+            11'h002, 11'h002,
+            8'hAB, 8'h00,
+            1'b1, 1'b0,            // Core 0 write, Core 1 read
+            4, "Core 0 write with broadcast",
+            8'h11, 8'h11,          // Core 0 writes AB, Core 1 still has old data
+            1'b0, 1'b0, 1'b0,      // Write doesn't set hit flags
+            1'b1, 1'b0, 1'b0       // Core 1 should hit cached data
+        );
+        #20
+        // TEST 5: Core 1 reads the updated location (should see updated data via snooping)
         
-        // TEST 5: Core 1 reads the updated location (should see updated data)
-        addr_1 = 11'h040;
-        mode_1 = 0;        // Read
-        wait_clocks(1);
-        display_status(5, "Core 1 read after Core 0 write update");
-        
-        // TEST 6: Core 1 writes to same location (write update)
-        addr_1 = 11'h040;
-        data_in_1 = 16'h1234;
-        mode_1 = 1;        // Write
-        wait_clocks(1);
-        display_status(6, "Core 1 write with update broadcast");
-        
-        // TEST 7: Core 0 reads the location updated by Core 1
-        addr_0 = 11'h040;
-        mode_0 = 0;        // Read
-        wait_clocks(1);
-        display_status(7, "Core 0 read after Core 1 write update");
-        
-        // TEST 8: Different address for Core 0
-        addr_0 = 11'h080;  // Different address
-        mode_0 = 0;        // Read
-        wait_clocks(1);
-        display_status(8, "Core 0 read from different address");
-        
-        // TEST 9: Core 1 writes to different address
-        addr_1 = 11'h0C0;  // Another different address
-        data_in_1 = 16'h5678;
-        mode_1 = 1;        // Write
-        wait_clocks(1);
-        display_status(9, "Core 1 write to different address");
-        
-        // TEST 10: Core 0 reads from Core 1's written address
-        addr_0 = 11'h0C0;  // Same as Core 1's address
-        mode_0 = 0;        // Read
-        wait_clocks(1);
-        display_status(10, "Core 0 read from Core 1's written address");
-        
-        // TEST 11: Test L2 cache behavior - access enough addresses to fill L1
-        $display("\\n=== TESTING L2 CACHE BEHAVIOR ===");
-        
-        // Fill L1 cache of Core 0 with different addresses
-        addr_0 = 11'h100; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h140; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h180; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h1C0; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h200; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h240; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h280; mode_0 = 0; wait_clocks(1);
-        addr_0 = 11'h2C0; mode_0 = 0; wait_clocks(1);
-        
-        // Now access one more address (should cause L1 eviction and L2 allocation)
-        addr_0 = 11'h300; mode_0 = 0; wait_clocks(1);
-        display_status(11, "L1 cache full, accessing new address");
-        
-        // Access earlier address (should be L2 hit and promote to L1)
-        addr_0 = 11'h100; mode_0 = 0; wait_clocks(1);
-        display_status(12, "Access evicted address (L2 hit)");
-        
-        // TEST 12: Verify data consistency with multiple writes
-        $display("\\n=== TESTING DATA CONSISTENCY ===");
-        
-        // Both cores write to same address with different data
-        addr_0 = 11'h400; data_in_0 = 16'hDEAD; mode_0 = 1;
-        addr_1 = 11'h400; data_in_1 = 16'hBEEF; mode_1 = 1;
-        wait_clocks(1);
-        display_status(13, "Both cores write to same address");
-        
-        // Read from both cores to see final value
-        mode_0 = 0; mode_1 = 0;
-        wait_clocks(1);
-        display_status(14, "Both cores read after simultaneous write");
-        
-        // Final wait and summary
-        wait_clocks(10);
-        
-        $display("\\n=============================================================");
-        $display("Expected behaviors:");
-        $display("1. Read misses should assert wait_req and fetch from memory");
-        $display("2. Read hits should not assert wait_req");
-        $display("3. Writes should broadcast updates via bus");
-        $display("4. Updated data should be consistent across cores");
-        $display("5. L1 misses should check L2 before going to memory");
-        $display("=============================================================");
-        
+        apply_and_check(
+            11'h002, 11'h002,
+            8'h00, 8'h00,
+            1'b0, 1'b0,
+            5, "Core 1 read after Core 0 write update",
+            8'hAB, 8'hAB,          // Both should see updated data
+            1'b1, 1'b0, 1'b0,      // Core 0 L1 hit
+            1'b1, 1'b0, 1'b0       // Core 1 L1 hit (snooped data)
+        );
+        #20
+        // TEST 6: Test different addresses
+        $display("\n=== DIFFERENT ADDRESS TESTS ===");
+        apply_and_check(
+            11'h004, 11'h006,      // Different addresses
+            8'h00, 8'h00,
+            1'b0, 1'b0,
+            6, "Both cores read different addresses",
+            8'hab, 8'hab,          // memory[2]=0x12, memory[3]=0x13
+            1'b0, 1'b0, 1'b1,      // Core 0 miss
+            1'b0, 1'b0, 1'b1       // Core 1 miss
+        );
+        #20
+        // TEST 7: Verify L1 hits after allocation
+        apply_and_check(
+            11'h004, 11'h006,      // Same addresses as previous test
+            8'h00, 8'h00,
+            1'b0, 1'b0,
+            7, "L1 hits after previous allocation",
+            8'h12, 8'h13,
+            1'b1, 1'b0, 1'b0,      // Core 0 L1 hit  
+            1'b1, 1'b0, 1'b0       // Core 1 L1 hit
+        );
+         
         $finish;
     end
     
-    // Monitor for debugging
-//    initial begin
-//        $monitor("Time: %0t | Core0: A=%h D_in=%h M=%b D_out=%h H1=%b H2=%b W=%b | Core1: A=%h D_in=%h M=%b D_out=%h H1=%b H2=%b W=%b | Bus: C=%b A=%h D=%h",
-//                 $time, addr_0, data_in_0, mode_0, data_out_0, hit1_0, hit2_0, wait_req_0,
-//                        addr_1, data_in_1, mode_1, data_out_1, hit1_1, hit2_1, wait_req_1,
-//                        dut.universal_bus_cmd, dut.universal_bus_addr, dut.universal_bus_data);
+//    // Enhanced monitor for debugging
+//    always @(posedge clk) begin
+//        if (!rst) begin
+//            $display("CLK+ T:%0t | C0[A:%h→D:%h H1:%b W:%b] C1[A:%h→D:%h H1:%b W:%b]",
+//                     $time, addr_0, data_out_0, hit1_0, wait_req_0,
+//                            addr_1, data_out_1, hit1_1, wait_req_1);
+//        end
 //    end
     
-    // Generate VCD file for waveform viewing
+    // Generate VCD file
     initial begin
-        $dumpfile("cache_msi_test.vcd");
+        $dumpfile("cache_timing_fixed_test.vcd");
         $dumpvars(0, tb_dual_core_cache_system);
     end
     

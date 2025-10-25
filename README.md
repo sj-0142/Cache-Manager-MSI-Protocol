@@ -45,11 +45,7 @@ The cache system is composed of **two cache controller instances** and a **share
      - **Read requests** (L1 → L2 → memory).  
      - **Write requests** (update local caches + memory) 
      - **Snooped updates** (incoming bus updates from the other core).  
-
-   **MSI State Transitions**:  
-   - **Invalid → Shared**: On read miss and bus/memory fetch.  
-   - **Shared → Shared**: On receiving bus updates from other cores.  
-   - **Any → Shared**: On local write with update broadcast.  
+ 
 
 2. **Dual-Core Integration (`dual_core_cache_system.v`)**  
    - Instantiates two **independent cache controllers**.  
@@ -79,7 +75,6 @@ The cache system is composed of **two cache controller instances** and a **share
 **Synthesis Tool**: Xilinx Vivado Design Suite  
 **Target FPGA**: Nexys 4 DDR (Artix-7 XC7A100TCSG324-1)  
 **Verification**: RTL simulation with multi-core read/write workloads  
-**Resource Usage**: Configurable L1/L2 sizes with LRU replacement policy  
 
 ---
 
